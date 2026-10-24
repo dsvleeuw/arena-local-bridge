@@ -372,33 +372,34 @@ test("re-running keeps both keys and unrelated .env content", (t) => {
   assert.equal(readEnv(dataDir).STORAGE_ENCRYPTION_KEY, keys.STORAGE_ENCRYPTION_KEY);
 });
 
-test("--headed shows the sign-in browser, and without it nothing turns headed mode on", async (t) => {
+test("the browser is visible by default, and --headless (or ARENA_HEADED=0) opts out", async (t) => {
   const fx = fixture(t);
   const port = await freePort();
   const dataDir = path.join(fx.root, "state");
-  const plain = fx.run([
-    "--email",
-    "fixture@example.com",
-    "--password",
-    "pw",
-    "--data-dir",
-    dataDir,
-    "--chrome",
-    fx.browser,
-    "--port",
-    String(port),
-    "--no-start",
-  ]);
-  assert.equal(plain.status, 0, plain.stderr + plain.stdout);
-  assert.equal(fx.lines(fx.events).find((event) => event.argv).headed, "");
+  const base = ["--email", "fixture@example.com", "--password", "pw", "--data-dir", dataDir, "--no-start"];
 
-  const headed = fx.run(
-    ["--email", "fixture@example.com", "--password", "pw", "--data-dir", dataDir, "--chrome", fx.browser, "--no-start", "--headed"],
-    { FIXTURE_SELFTEST_EXIT: "" }
-  );
-  assert.equal(headed.status, 0, headed.stderr + headed.stdout);
+  const plain = fx.run([...base, "--chrome", fx.browser]);
+  assert.equal(plain.status, 0, plain.stderr + plain.stdout);
+  assert.equal(fx.lines(fx.events).find((event) => event.argv).headed, "1", "headed is the default");
+  assert.equal(readEnv(dataDir).ARENA_HEADED, "1", "and it is remembered for later starts");
+
+  // A windowless run has to be asked for, and is remembered too.
+  const headless = fx.run([...base, "--chrome", fx.browser, "--headless"]);
+  assert.equal(headless.status, 0, headless.stderr + headless.stdout);
+  assert.equal(fx.lines(fx.events).filter((event) => event.argv).at(-1).headed, "");
+  assert.equal(readEnv(dataDir).ARENA_HEADED, "0");
+  assert.equal(fx.lines(fx.boots).length, 0, "--no-start must not start a bridge");
+
+  // …and a plain re-run respects that stored 0 instead of flipping it back.
+  const again = fx.run([...base, "--chrome", fx.browser]);
+  assert.equal(again.status, 0, again.stderr + again.stdout);
+  assert.equal(fx.lines(fx.events).filter((event) => event.argv).at(-1).headed, "");
+
+  // --headed is still accepted for old command lines.
+  const forced = fx.run([...base, "--chrome", fx.browser, "--headed"]);
+  assert.equal(forced.status, 0, forced.stderr + forced.stdout);
   assert.equal(fx.lines(fx.events).filter((event) => event.argv).at(-1).headed, "1");
-  assert.match(headed.stdout, /headed: watch the browser/);
+  assert.equal(readEnv(dataDir).ARENA_HEADED, "1");
 });
 
 test("--start brings the installed bridge back without signing in again", async (t) => {

@@ -16,6 +16,7 @@ function loginFixture(t) {
   fs.copyFileSync(new URL("../src/secret.mjs", import.meta.url), path.join(root, "src/secret.mjs"));
   const record = `import fs from "node:fs"; const event = (type, data) => fs.appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({type, data}) + "\\n");\n`;
   fs.writeFileSync(path.join(root, "src/config.mjs"), record + `
+    export function applyRuntimeEnv() { event("runtime-env", {}); return []; }
     export function loadDotEnv(file) {
       event("dotenv", { file });
       return fs.existsSync(file) ? Object.fromEntries(fs.readFileSync(file, "utf8").trim().split("\\n").filter(Boolean).map(line => line.split("="))) : {};

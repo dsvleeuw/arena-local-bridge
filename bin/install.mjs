@@ -62,7 +62,8 @@ export function parseArgs(argv) {
     dataDir: "",
     chrome: "",
     noLogin: false,
-    headed: false,
+    // null = not stated on this run, so DATA_DIR/.env decides.
+    headed: null,
     noStart: false,
     noSelftest: false,
     start: false,
@@ -133,6 +134,9 @@ export function parseArgs(argv) {
         break;
       case "--headed":
         options.headed = true;
+        break;
+      case "--headless":
+        options.headed = false;
         break;
       case "--no-start":
         options.noStart = true;
@@ -216,6 +220,22 @@ export function mergeEnvFile(existing, updates) {
     if (String(value) !== "") kept.push(`${key}=${value}`);
   }
   return `${kept.join("\n")}\n`;
+}
+
+/**
+ * A visible browser is the default.
+ *
+ * Arena renders differently for a headless engine, and a browser the user can
+ * watch is what makes a refused sign-in diagnosable; the portable launcher has
+ * always run this way (it sets ARENA_HEADED=1 itself). `--headless` opts out,
+ * and so does ARENA_HEADED=0 already in DATA_DIR/.env, so an install that said
+ * otherwise once keeps saying it.
+ */
+function resolveHeaded(options, existingEnv) {
+  if (options.headed !== null) return options.headed;
+  const stored = String(existingEnv.ARENA_HEADED ?? "").trim();
+  if (stored === "0" || stored.toLowerCase() === "false") return false;
+  return true;
 }
 
 function resolvePort(options, existingEnv) {
@@ -666,7 +686,7 @@ async function login({ root, dataDir, key, email, password, chrome, proxy, heade
         "",
         headed
           ? "The browser window is still open; close it once you have read the page."
-          : "Add --headed to watch the sign-in in a real browser window.",
+          : "Re-run without --headless to watch the sign-in in a real browser window.",
       ].join("\n")
     );
   }
@@ -733,9 +753,9 @@ Options:
   --proxy <url>         Browser proxy, e.g. socks5://127.0.0.1:40000
   --data-dir <dir>      State directory (default ~/.arena-bridge)
   --chrome <path>       Chromium-based browser to use
-  --headed              Show the browser instead of running it headless. Useful
-                        for the first sign-in, and for a sign-in that Arena
-                        refuses: you can see what the page actually does.
+  --headed              Accepted, and the default: the browser is visible.
+  --headless            Run the browser without a window (less to watch, and
+                        Arena renders differently to a headless engine).
   --no-login            Install and write .env only; do not sign in or start
   --no-start            Sign in, but do not start the bridge
   --no-selftest         Skip the end-to-end Arena self-test
@@ -807,6 +827,7 @@ async function installCommand(options) {
   const key = resolveBridgeKey(options, env.values);
   const storageKey = resolveStorageKey(env.values);
   const proxy = options.proxy === null ? String(env.values.ARENA_AGENT_PROXY || "") : options.proxy;
+  const headed = resolveHeaded(options, env.values);
 
   step(1, "Node.js check");
   detail(`node ${process.version}`);
@@ -844,6 +865,7 @@ async function installCommand(options) {
     { key: "ARENA_AGENT_PROXY", value: proxy },
     { key: "ARENA_AGENT_CHROME", value: chrome },
     { key: "ARENA_AGENT_BRIDGE_KEY", value: key },
+    { key: "ARENA_HEADED", value: headed ? "1" : "0" },
     { key: "DATA_DIR", value: dataDir },
     { key: "STORAGE_ENCRYPTION_KEY", value: storageKey },
   ];
@@ -865,7 +887,7 @@ async function installCommand(options) {
     password: String(options.password || process.env.ARENA_PASSWORD || ""),
     chrome,
     proxy,
-    headed: options.headed,
+    headed,
   });
 
   if (options.noStart) {
@@ -876,7 +898,7 @@ async function installCommand(options) {
   }
 
   step(5, "Start bridge");
-  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy, headed: options.headed });
+  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy, headed });
 
   step(6, "Wait for health");
   detail(`healthy on http://127.0.0.1:${port} (pid ${payload.pid ?? started.child.pid})`);
@@ -888,7 +910,7 @@ async function installCommand(options) {
     detail("--no-selftest: skipped");
   } else {
     step(7, "Self-test (a real turn against Arena)");
-    selftest = runSelftest({ root: ROOT, dataDir, key, chrome, proxy, headed: options.headed });
+    selftest = runSelftest({ root: ROOT, dataDir, key, chrome, proxy, headed });
   }
 
   printStartSummary({ dataDir, envFile: env.file, key, port, selftest });
@@ -905,6 +927,7 @@ async function startCommand(options) {
   const port = resolvePort(options, env.values);
   const key = env.values.ARENA_AGENT_BRIDGE_KEY;
   const proxy = options.proxy === null ? String(env.values.ARENA_AGENT_PROXY || "") : options.proxy;
+  const headed = resolveHeaded(options, env.values);
 
   step(1, "Node.js check");
   detail(`node ${process.version}`);
@@ -925,7 +948,7 @@ async function startCommand(options) {
   step(4, "Sign in to arena.ai with your own account");
   detail("--start: skipped; the saved account is reused");
   step(5, "Start bridge");
-  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy, headed: options.headed });
+  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy, headed });
   step(6, "Wait for health");
   detail(`healthy on http://127.0.0.1:${port} (pid ${payload.pid ?? started.child.pid})`);
   detail(`log: ${started.logFile}`);

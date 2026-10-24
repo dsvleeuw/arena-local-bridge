@@ -22,7 +22,7 @@
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadDotEnv, loadConfig } from "../src/config.mjs";
+import { loadDotEnv, loadConfig, applyRuntimeEnv } from "../src/config.mjs";
 import { CredentialStore } from "../src/credentials.mjs";
 import { Bridge } from "../src/bridge.mjs";
 import { log } from "../src/util.mjs";
@@ -135,6 +135,7 @@ export async function converseOnce(bridge, sessionId, prompt) {
 async function main() {
   const dataDir = process.env.DATA_DIR || path.join(os.homedir(), ".arena-bridge");
   const dotEnv = loadDotEnv(path.join(dataDir, ".env"));
+  applyRuntimeEnv(dotEnv);
   const config = loadConfig({ ...dotEnv, ...process.env }, { requireBridgeKey: false });
   const secret = requireSecret(dotEnv);
   const credentials = new CredentialStore({

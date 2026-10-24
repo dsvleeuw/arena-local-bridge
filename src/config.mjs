@@ -23,6 +23,28 @@ export function loadDotEnv(envPath) {
   return out;
 }
 
+/**
+ * Variables some modules read straight from `process.env` instead of taking the
+ * config object — arena-login's headless switch and the deployment pin are the
+ * two. DATA_DIR/.env is where an install states its settings, but loadDotEnv
+ * only feeds loadConfig, so a value written there used to be invisible to those
+ * readers. Applied only when the real environment does not already answer, which
+ * keeps `ARENA_HEADED=0 node src/index.mjs` an override rather than a default.
+ *
+ * Returns the names it applied, so a boot log can say what came from the file.
+ */
+export function applyRuntimeEnv(dotEnv = {}, env = process.env) {
+  const applied = [];
+  for (const key of ["ARENA_HEADED", "ARENA_DEPLOYMENT_PIN"]) {
+    const value = dotEnv?.[key];
+    if (value === undefined || value === null || String(value).trim() === "") continue;
+    if (env[key] !== undefined && env[key] !== "") continue;
+    env[key] = String(value).trim();
+    applied.push(key);
+  }
+  return applied;
+}
+
 export function loadConfig(env = {}, { requireBridgeKey = true } = {}) {
   const dataDir = env.DATA_DIR || path.join(os.homedir(), ".arena-bridge");
   const port = Number(env.PORT || 20140);
