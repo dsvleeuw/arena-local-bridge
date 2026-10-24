@@ -84,6 +84,92 @@ export const IDEMPOTENCY_HEADER = "x-arena-idempotency-key";
 // resolveWorkspace() turns into a directory (see codex-workspace.mjs).
 export const CODEX_SESSION_HEADER = "x-codex-session-id";
 
+/**
+ * One attempt at a Session's /out read.
+ *
+ * A plain function, not a method: the fetch has to run inside the page (its
+ * origin and headers), and keeping the call out of the class is what lets the
+ * retry policy in readAgentOutput be tested without a browser.
+ */
+export async function readOutputOnce(page, state) {
+  return page.evaluate(
+    async ({ id, token, lastEventId, readBudgetMs }) => {
+      const controller = new AbortController();
+      let timer = null;
+      // §4.37 — 0 / unset budget means "wait forever"; only arm the abort timer
+      // when an explicit positive budget is configured.
+      if (readBudgetMs && Number(readBudgetMs) > 0) {
+        timer = setTimeout(() => controller.abort(), Number(readBudgetMs) + 30_000);
+      }
+      let reader;
+      try {
+        const headers = { Accept: "text/event-stream", Authorization: `Bearer ${token}` };
+        if (lastEventId) headers["Last-Event-ID"] = lastEventId;
+        const response = await fetch(`/ai-proxy/realtime/v1/sessions/${id}/out`, {
+          headers,
+          signal: controller.signal,
+        });
+        reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let raw = "";
+        while (raw.length < 4_000_000) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          raw += decoder.decode(value, { stream: true });
+          const lfEnd = raw.lastIndexOf("\n\n");
+          const crlfEnd = raw.lastIndexOf("\r\n\r\n");
+          const completeEnd = Math.max(lfEnd < 0 ? -1 : lfEnd + 2, crlfEnd < 0 ? -1 : crlfEnd + 4);
+          const complete = completeEnd > 0 ? raw.slice(0, completeEnd) : "";
+          const hasCompleteTool = /tool-input-(?:available|error)/.test(complete);
+          const hasFinish = complete.includes('\\"type\\":\\"finish\\"');
+          const hasTurnComplete = complete.includes("turn-complete");
+          if (hasCompleteTool || (hasFinish && hasTurnComplete)) break;
+        }
+        await reader.cancel().catch(() => undefined);
+        return { status: response.status, raw };
+      } finally {
+        clearTimeout(timer);
+        await reader?.cancel().catch(() => undefined);
+      }
+    },
+  { id: state.id, token: state.token, lastEventId: state.lastEventId || "", readBudgetMs: state.readBudgetMs || 0, marker: state.marker || "" }
+);
+}
+
+/**
+ * Read a turn, with the one retry a stale public-access-token deserves.
+ *
+ * A 401/403 from /out means the token was not accepted. That token is scraped
+ * from the Session page and changes with the deployment that created the
+ * Session, so a token that was fresh a moment ago can already be stale for the
+ * read path; one more read with a re-scraped token fixes that without throwing
+ * the Session away. Only if that also fails is the refusal real, and only ONE
+ * retry is made: a restricted account answers 403 forever, and hammering it
+ * turns a clear failure into a slow one.
+ *
+ * The refusal's own words travel with the error. "Arena Agent output failed:
+ * 403" cannot tell a restricted account from a stale token or a reCAPTCHA block,
+ * and those call for different reactions.
+ *
+ * Kept out of the class so the policy can be tested without a browser.
+ */
+export async function readAgentTurn({ state, readOnce, refreshToken }) {
+  let result = await readOnce();
+  if (result.status === 401 || result.status === 403) {
+    const previous = state.token;
+    const refreshed = await refreshToken();
+    if (refreshed && refreshed !== previous) result = await readOnce();
+  }
+  if (result.status !== 200) {
+    const detail = String(result.raw || "").replace(/\s+/g, " ").trim().slice(0, 300);
+    throw Object.assign(
+      new Error(`Arena Agent output failed: ${result.status}${detail ? ` ${detail}` : ""}`),
+      { status: result.status }
+    );
+  }
+  return result.raw;
+}
+
 export class Bridge {
   constructor({ config, credentials, recaptcha, startedAt = Date.now() }) {
     this.config = config;
@@ -724,52 +810,31 @@ export class Bridge {
     return parsePublicToken(html);
   }
 
+  /**
+   * Read one turn's raw SSE from the Session's /out stream.
+   *
+   * A 401/403 here means the public-access-token was not accepted. That token is
+   * scraped from the Session page and changes with the deployment that created
+   * the Session, so a token that was fresh a moment ago can already be stale for
+   * the read path; one more read with a re-scraped token fixes that without
+   * throwing away the Session. Only if that also fails is the refusal real, and
+   * only ONE retry is made: a restricted account answers 403 forever, and
+   * hammering it turns a clear failure into a slow one.
+   *
+   * The refusal's own words travel with the error. "Arena Agent output failed:
+   * 403" cannot tell a restricted account from a stale token or a reCAPTCHA
+   * block, and those call for different reactions.
+   */
   async readAgentOutput(page, state) {
-    const result = await page.evaluate(
-      async ({ id, token, lastEventId, readBudgetMs }) => {
-        const controller = new AbortController();
-        let timer = null;
-        // §4.37 — 0 / unset budget means "wait forever"; only arm the abort timer
-        // when an explicit positive budget is configured.
-        if (readBudgetMs && Number(readBudgetMs) > 0) {
-          timer = setTimeout(() => controller.abort(), Number(readBudgetMs) + 30_000);
-        }
-        let reader;
-        try {
-          const headers = { Accept: "text/event-stream", Authorization: `Bearer ${token}` };
-          if (lastEventId) headers["Last-Event-ID"] = lastEventId;
-          const response = await fetch(`/ai-proxy/realtime/v1/sessions/${id}/out`, {
-            headers,
-            signal: controller.signal,
-          });
-          reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let raw = "";
-          while (raw.length < 4_000_000) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            raw += decoder.decode(value, { stream: true });
-            const lfEnd = raw.lastIndexOf("\n\n");
-            const crlfEnd = raw.lastIndexOf("\r\n\r\n");
-            const completeEnd = Math.max(lfEnd < 0 ? -1 : lfEnd + 2, crlfEnd < 0 ? -1 : crlfEnd + 4);
-            const complete = completeEnd > 0 ? raw.slice(0, completeEnd) : "";
-            const hasCompleteTool = /tool-input-(?:available|error)/.test(complete);
-            const hasFinish = complete.includes('\\"type\\":\\"finish\\"');
-            const hasTurnComplete = complete.includes("turn-complete");
-            if (hasCompleteTool || (hasFinish && hasTurnComplete)) break;
-          }
-          await reader.cancel().catch(() => undefined);
-          return { status: response.status, raw };
-        } finally {
-          clearTimeout(timer);
-          await reader?.cancel().catch(() => undefined);
-        }
+    return readAgentTurn({
+      state,
+      readOnce: () => readOutputOnce(page, state),
+      refreshToken: async () => {
+        const token = await this.refreshAgentToken(page, state.id).catch(() => "");
+        if (token) state.token = token;
+        return token;
       },
-      { id: state.id, token: state.token, lastEventId: state.lastEventId || "", readBudgetMs: state.readBudgetMs || 0, readAbortMs: state.readBudgetMs && state.readBudgetMs > 0 ? state.readBudgetMs + 30_000 : 0, marker: state.marker || "" }
-    );
-    if (result.status !== 200)
-      throw Object.assign(new Error(`Arena Agent output failed: ${result.status}`), { status: result.status });
-    return result.raw;
+    });
   }
 
   /**

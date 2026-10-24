@@ -64,6 +64,11 @@ export async function diagnoseComposeFailure(page, error, { proxy = "" } = {}) {
   const message = String(error?.message || error || "");
   return {
     kind: /recaptcha/i.test(message) ? "recaptcha" : "compose",
+    // Which step of the turn the refusal belongs to. "Arena Agent output failed"
+    // means the Session WAS created (the URL carries its id) and reading it was
+    // refused — a different problem from a composer that never rendered, and it
+    // points at the account or its token rather than at the page.
+    stage: /output failed/i.test(message) ? "read" : /append failed/i.test(message) ? "append" : "compose",
     status: Number(error?.status || 0) || null,
     headed: process.env.ARENA_HEADED === "1",
     // The value the BROWSER was actually handed, not what the shell happens to
