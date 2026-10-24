@@ -6,7 +6,7 @@
 // the error, and a token that was merely stale is refreshed and retried once.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readAgentTurn, readOutputOnce } from "../src/bridge.mjs";
+import { readAgentTurn, readOutputOnce, sessionTokenFromRequest } from "../src/bridge.mjs";
 
 const STATE = () => ({ id: "11111111-2222-4333-8444-555555555555", token: "stale-token", lastEventId: "" });
 
@@ -19,9 +19,8 @@ function bridgeWith({ fetchImpl, freshToken = "" }) {
       readAgentTurn({
         state,
         readOnce: () => readOutputOnce(pageRef, state),
-        refreshToken: async () => {
+        nextToken: async () => {
           seen.push("refresh");
-          if (freshToken) state.token = freshToken;
           return freshToken;
         },
       }),
@@ -101,4 +100,67 @@ test("the same token twice is not worth a second read", async (t) => {
   });
   await assert.rejects(bridge.readAgentOutput(page(), STATE()), /401/);
   assert.equal(reads, 1);
+});
+
+
+// ── the token the page itself used ──────────────────────────────────────────
+
+test("sessionTokenFromRequest reads the page's own bearer token", () => {
+  const found = sessionTokenFromRequest(
+    "https://arena.ai/ai-proxy/realtime/v1/sessions/01a16dcb-120a-7b3d-8d69-ddc6949c96ab/out",
+    { authorization: "Bearer abc.def.ghi" }
+  );
+  assert.deepEqual(found, { id: "01a16dcb-120a-7b3d-8d69-ddc6949c96ab", token: "abc.def.ghi" });
+});
+
+test("sessionTokenFromRequest ignores anything that is not an /out read with a bearer", () => {
+  const out = "https://arena.ai/ai-proxy/realtime/v1/sessions/01a16dcb-120a-7b3d-8d69-ddc6949c96ab/out";
+  assert.equal(sessionTokenFromRequest(out, {}), null, "no Authorization header");
+  assert.equal(sessionTokenFromRequest(out, { authorization: "Basic xyz" }), null, "not a bearer");
+  assert.equal(
+    sessionTokenFromRequest("https://arena.ai/ai-proxy/realtime/v1/sessions/01a16dcb-120a-7b3d-8d69-ddc6949c96ab/in/append", {
+      authorization: "Bearer abc",
+    }),
+    null,
+    "only the read stream"
+  );
+  assert.equal(sessionTokenFromRequest("", { authorization: "Bearer abc" }), null);
+});
+
+test("a live token is tried before a re-scrape, and each only once", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const tried = [];
+  const state = { id: "11111111-2222-4333-8444-555555555555", token: "scraped-stale", lastEventId: "" };
+  const candidates = ["live-token", "scraped-stale", "scraped-fresh"];
+  globalThis.fetch = async (url, options) => {
+    tried.push(options.headers.Authorization);
+    return options.headers.Authorization === "Bearer scraped-fresh"
+      ? new Response(TURN, { status: 200 })
+      : new Response("forbidden", { status: 403 });
+  };
+  const raw = await readAgentTurn({
+    state,
+    readOnce: () => readOutputOnce(page(), state),
+    nextToken: async () => candidates.shift() || "",
+  });
+  assert.equal(raw, TURN);
+  assert.deepEqual(tried, ["Bearer scraped-stale", "Bearer live-token", "Bearer scraped-fresh"]);
+  assert.equal(state.token, "scraped-fresh");
+});
+
+test("the candidate list stops the loop when nothing new is left", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  let reads = 0;
+  const state = { id: "11111111-2222-4333-8444-555555555555", token: "only-token", lastEventId: "" };
+  globalThis.fetch = async () => {
+    reads += 1;
+    return new Response("nope", { status: 403 });
+  };
+  await assert.rejects(
+    readAgentTurn({ state, readOnce: () => readOutputOnce(page(), state), nextToken: async () => "" }),
+    /403/
+  );
+  assert.equal(reads, 1, "no candidates means no pointless retry");
 });

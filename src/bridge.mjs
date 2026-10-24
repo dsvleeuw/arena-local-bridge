@@ -137,15 +137,17 @@ export async function readOutputOnce(page, state) {
 }
 
 /**
- * Read a turn, with the one retry a stale public-access-token deserves.
+ * Read a turn, trying each distinct token at most once.
  *
- * A 401/403 from /out means the token was not accepted. That token is scraped
- * from the Session page and changes with the deployment that created the
- * Session, so a token that was fresh a moment ago can already be stale for the
- * read path; one more read with a re-scraped token fixes that without throwing
- * the Session away. Only if that also fails is the refusal real, and only ONE
- * retry is made: a restricted account answers 403 forever, and hammering it
- * turns a clear failure into a slow one.
+ * A 401/403 from /out means the token was not accepted — and the token is where
+ * this file has historically guessed: it was scraped out of the Session page's
+ * HTML, which is not necessarily the token the page itself uses. The page's own
+ * request carries the authoritative one, and `nextToken` is where a caller
+ * offers better candidates (live request header first, then a re-scrape).
+ *
+ * Bounded on purpose: every candidate is tried once, at most `maxAttempts`
+ * reads in total. A restricted account answers 403 forever, and hammering it
+ * only turns a clear failure into a slow one.
  *
  * The refusal's own words travel with the error. "Arena Agent output failed:
  * 403" cannot tell a restricted account from a stale token or a reCAPTCHA block,
@@ -153,12 +155,31 @@ export async function readOutputOnce(page, state) {
  *
  * Kept out of the class so the policy can be tested without a browser.
  */
-export async function readAgentTurn({ state, readOnce, refreshToken }) {
+export async function readAgentTurn({ state, readOnce, nextToken, maxAttempts = 4 }) {
+  // Every token is tried at most once: a refusal cannot become an answer by
+  // sending the same credential again, and the candidate list can legitimately
+  // contain the token that is already in state.
+  const tried = new Set([String(state.token || "")]);
+  // Bounded pulls as well as bounded reads: nextToken() is a caller callback,
+  // and one that keeps answering with an already-tried token must not spin.
+  let pulls = 0;
+  const nextCandidate = async () => {
+    while (pulls < 8) {
+      pulls += 1;
+      const candidate = await nextToken();
+      if (!candidate) return "";
+      if (!tried.has(candidate)) return candidate;
+    }
+    return "";
+  };
   let result = await readOnce();
-  if (result.status === 401 || result.status === 403) {
-    const previous = state.token;
-    const refreshed = await refreshToken();
-    if (refreshed && refreshed !== previous) result = await readOnce();
+  for (let attempt = 1; result.status === 401 || result.status === 403; attempt += 1) {
+    if (attempt >= maxAttempts) break;
+    const candidate = await nextCandidate();
+    if (!candidate) break;
+    tried.add(candidate);
+    state.token = candidate;
+    result = await readOnce();
   }
   if (result.status !== 200) {
     const detail = String(result.raw || "").replace(/\s+/g, " ").trim().slice(0, 300);
@@ -168,6 +189,23 @@ export async function readAgentTurn({ state, readOnce, refreshToken }) {
     );
   }
   return result.raw;
+}
+
+/**
+ * The Session id and bearer token of an /out request, or null.
+ *
+ * The page opens `/ai-proxy/realtime/v1/sessions/<id>/out` with the
+ * `public-access-token` in an Authorization header. Reading that header is how
+ * the bridge learns the token that actually works, instead of scraping one out
+ * of the HTML and hoping it is the same one.
+ */
+export function sessionTokenFromRequest(url, headers) {
+  const match = String(url || "").match(/\/ai-proxy\/realtime\/v1\/sessions\/([0-9a-fA-F-]{36})\/out(?:\?|$)/);
+  if (!match) return null;
+  const auth = String(headers?.authorization || headers?.Authorization || "");
+  if (!/^Bearer\s+/i.test(auth)) return null;
+  const token = auth.replace(/^Bearer\s+/i, "").trim();
+  return token ? { id: match[1], token } : null;
 }
 
 export class Bridge {
@@ -207,6 +245,12 @@ export class Bridge {
     };
     this.operationQueue = Promise.resolve();
     this.lastDumps = {};
+    // Tokens the page itself sends, keyed by Session id. This is the one source
+    // that cannot be wrong: it is the header the working tab used. The HTML
+    // scrape that used to be the only source can return a token Arena refuses
+    // with 403 even while the page streams the same Session happily.
+    this.liveTokens = new Map();
+    this.tokenObservers = new WeakSet();
     // Auto-inject the explicitly published local MCP endpoint into a session the
     // first time we talk to it (and again whenever the endpoint changes).
     this.mcpInjected = this.#loadMcpInjected();
@@ -556,7 +600,12 @@ export class Bridge {
    * default pick, which is what the session-creating flows want.
    */
   async #page(account, purpose) {
-    return this.browser.getPage(account || this.#credential(), purpose);
+    const page = await this.browser.getPage(account || this.#credential(), purpose);
+    // Every page that can drive a turn also reveals the token it uses; attaching
+    // here means a read has a trustworthy candidate even for a Session the
+    // bridge did not create (attach-session, read-session, recovery).
+    this.observeSessionTokens(page);
+    return page;
   }
 
   /**
@@ -591,6 +640,9 @@ export class Bridge {
     const editor = page.locator('[contenteditable="true"]').last();
     await editor.waitFor({ state: "visible", timeout: 60_000 });
     await editor.fill(prompt);
+    // Before the send: the tab streams this Session right after create-chat, and
+    // that request carries the only token that is certain to work.
+    this.observeSessionTokens(page);
     const createResponse = page.waitForResponse(
       (response) => response.url().includes("/nextjs-api/stream/create-chat"),
       { timeout: 60_000 }
@@ -606,7 +658,14 @@ export class Bridge {
     }
     const id = JSON.parse(createText).id;
     if (!id) throw new Error("Arena Agent composer returned no session id");
-    let token = "";
+    // Where the token comes from, best first:
+    //   1. the create-chat response header, when Arena sends one,
+    //   2. the Authorization header of the page's own /out request — the token
+    //      the working tab is streaming with,
+    //   3. the Session page's HTML, which was the only source before and is the
+    //      one Arena sometimes refuses (403) while the page streams fine.
+    let token = String(response.headers()["public-access-token"] || "").trim();
+    if (!token) token = await this.awaitLiveToken(page, id);
     for (let attempt = 0; attempt < 8 && !token; attempt++) {
       const html = await page.evaluate(async (id) => (await fetch(`/agent/${id}`)).text(), id);
       token = parsePublicToken(html);
@@ -802,7 +861,78 @@ export class Bridge {
     }
     const headerToken = response.headers()["public-access-token"] || "";
     if (headerToken) observedToken = headerToken;
-    if (observedToken) state.token = observedToken;
+    if (observedToken) {
+      state.token = observedToken;
+      // Persist what the page itself used: a later read may need it again.
+      this.liveTokens.set(String(state.id), { token: observedToken, at: Date.now() });
+    }
+  }
+
+  /**
+   * Record the tokens this page sends, once per page.
+   *
+   * `getPage` hands the same page out for a purpose, so this is attached there
+   * and never twice; the listener only reads request metadata, so it cannot
+   * disturb a turn.
+   */
+  observeSessionTokens(page) {
+    // Not every page-like object can be listened to (test doubles, a page that
+    // was already closed): observation is an optimisation, never a requirement.
+    if (!page || typeof page.on !== "function") return;
+    if (this.tokenObservers.has(page)) return;
+    this.tokenObservers.add(page);
+    const remember = (request) => {
+      try {
+        const found = sessionTokenFromRequest(request.url(), request.headers());
+        if (found) this.liveTokens.set(found.id, { token: found.token, at: Date.now() });
+      } catch {
+        // A page that closed mid-request is not an error worth surfacing.
+      }
+    };
+    page.on("request", remember);
+  }
+
+  /** The token this page was last seen using for `id`, if it is recent. */
+  liveToken(id, maxAgeMs = 30 * 60 * 1000) {
+    const entry = this.liveTokens.get(String(id));
+    if (!entry) return "";
+    if (Date.now() - entry.at > maxAgeMs) {
+      this.liveTokens.delete(String(id));
+      return "";
+    }
+    return entry.token;
+  }
+
+  /**
+   * Token candidates for `id`, best first: what the page itself sent, then a
+   * fresh scrape of the Session page. `state.token` is already in use and is not
+   * repeated — readAgentTurn skips a candidate equal to the current token.
+   */
+  async tokenCandidates(page, id) {
+    const seen = [];
+    const live = this.liveToken(id);
+    if (live) seen.push(live);
+    const scraped = await this.refreshAgentToken(page, id).catch(() => "");
+    if (scraped) seen.push(scraped);
+    return seen;
+  }
+
+  /**
+   * Wait briefly for the page to reveal its own token for `id`.
+   *
+   * Called right after create-chat: the tab starts streaming immediately, and
+   * its request carries the authoritative header. Waiting is bounded because a
+   * page that is not streaming (a Session opened later, a tab that was closed)
+   * never produces one, and the HTML scrape is still there as a fallback.
+   */
+  async awaitLiveToken(page, id, timeoutMs = 8_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const live = this.liveToken(id);
+      if (live) return live;
+      if (Date.now() >= deadline) return "";
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
   }
 
   async refreshAgentToken(page, id) {
@@ -826,14 +956,12 @@ export class Bridge {
    * block, and those call for different reactions.
    */
   async readAgentOutput(page, state) {
+    this.observeSessionTokens(page);
+    const candidates = await this.tokenCandidates(page, state.id).catch(() => []);
     return readAgentTurn({
       state,
       readOnce: () => readOutputOnce(page, state),
-      refreshToken: async () => {
-        const token = await this.refreshAgentToken(page, state.id).catch(() => "");
-        if (token) state.token = token;
-        return token;
-      },
+      nextToken: async () => candidates.shift() || "",
     });
   }
 
