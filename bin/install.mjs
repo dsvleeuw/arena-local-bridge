@@ -28,7 +28,6 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { writeSecretFile } from "../src/secret.mjs";
 import { detectBrowser } from "../src/browser-detect.mjs";
@@ -566,19 +565,62 @@ function indent(text, prefix = "    ") {
 
 // ── login ───────────────────────────────────────────────────────────────────
 
-async function promptPassword(email) {
-  if (!process.stdin.isTTY) {
+/**
+ * Ask for the password without echoing it.
+ *
+ * readline's question() prints every key, so the old prompt put the user's
+ * password on screen — and from there into any screenshot, screen share or
+ * pasted transcript of the session. A terminal can hide input; this does it by
+ * putting stdin in raw mode and writing one '*' per character.
+ *
+ * Exported so the non-interactive refusal can be tested without a terminal.
+ */
+export async function promptPassword(email, { stdin = process.stdin, stderr = process.stderr } = {}) {
+  if (!stdin.isTTY) {
     throw new InstallError(
       `no password for ${email} and stdin is not interactive. Pass --password, or set ARENA_PASSWORD.`,
       1
     );
   }
-  const input = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return (await input.question(`Password for ${email}: `)).trim();
-  } finally {
-    input.close();
-  }
+  stderr.write(`Password for ${email}: `);
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding("utf8");
+  return await new Promise((resolve, reject) => {
+    let value = "";
+    const finish = (error) => {
+      stdin.removeListener("data", onData);
+      // Hand the terminal back the way it was found: cooked mode, no read.
+      stdin.setRawMode(false);
+      stdin.pause();
+      stderr.write("\n");
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const onData = (chunk) => {
+      for (const character of String(chunk)) {
+        if (character === "\r" || character === "\n" || character === "\u0004") {
+          // \u0004 is Ctrl-Z on Windows: an empty answer is still an answer.
+          return finish();
+        }
+        if (character === "\u0003") return finish(new InstallError("cancelled (Ctrl-C)", 130));
+        if (character === "\u007f" || character === "\b") {
+          if (value) {
+            value = value.slice(0, -1);
+            stderr.write("\b \b");
+          }
+          continue;
+        }
+        // Arrow keys and the like arrive as ESC sequences; do not let them
+        // become part of the password.
+        if (character === "\u001b" || character < " ") continue;
+        value += character;
+        stderr.write("*");
+      }
+      return undefined;
+    };
+    stdin.on("data", onData);
+  });
 }
 
 async function login({ root, dataDir, key, email, password, chrome, proxy, headed = false, env = process.env }) {
@@ -682,8 +724,8 @@ Usage:
 Options:
   --email <email>       Arena account email (or ARENA_EMAIL)
   --password <pass>     Arena password (or ARENA_PASSWORD; prompted when absent).
-                        Prefer the prompt: a password in argv is visible to
-                        other processes on this machine.
+                        Prefer the prompt: it does not echo, and a password in
+                        argv is visible to other processes on this machine.
   --key <hex>           Bearer key for the local API (kept from .env when omitted)
   --port <n>            Local HTTP port (default 20140, or the .env value)
   --proxy <url>         Browser proxy, e.g. socks5://127.0.0.1:40000

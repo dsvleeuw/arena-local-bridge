@@ -12,7 +12,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { parseArgs, mergeEnvFile, parseEnvFile, InstallError } from "../bin/install.mjs";
+import { parseArgs, mergeEnvFile, parseEnvFile, promptPassword, InstallError } from "../bin/install.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -212,6 +212,40 @@ test("parseArgs accepts install.sh's spellings and rejects a bad port", () => {
   assert.throws(() => parseArgs(["--nonsense"]), (error) => error instanceof InstallError && error.exitCode === 2);
   assert.throws(() => parseArgs(["--email"]), (error) => error instanceof InstallError && error.exitCode === 2);
   assert.throws(() => parseArgs(["--warp"]), /POSIX-only/);
+});
+
+test("the password prompt refuses a pipe instead of reading the wrong stream", async () => {
+  // A non-interactive stdin (a pipe, a scheduled task) must fail with a way out,
+  // not hang waiting for input nobody can type.
+  await assert.rejects(promptPassword("person@example.com", { stdin: { isTTY: false } }), /not interactive/);
+});
+
+test("the password prompt masks what is typed", async () => {
+  const listeners = new Map();
+  const stdin = {
+    isTTY: true,
+    setRawMode() {},
+    resume() {},
+    pause() {},
+    setEncoding() {},
+    on: (name, handler) => listeners.set(name, handler),
+    removeListener: (name) => listeners.delete(name),
+  };
+  let written = "";
+  const stderr = { write: (text) => { written += text; return true; } };
+  const promise = promptPassword("person@example.com", { stdin, stderr });
+  await new Promise((resolve) => setImmediate(resolve));
+  const type = (text) => listeners.get("data")(text);
+  type("corr");
+  type("\u007f"); // backspace removes the last character
+  type("rect\r");
+  assert.equal(await promise, "correct");
+  // The typed characters never reach the terminal: only the label, stars, and
+  // the erase sequence a backspace produces. Nothing after the label may be a
+  // letter or digit that could be read off a screenshot.
+  assert.equal(written.includes("corr"), false, "the password must not be echoed");
+  assert.ok(written.startsWith("Password for person@example.com: "), written);
+  assert.match(written.slice("Password for person@example.com: ".length), /^\*+\u0008 \u0008\*+\n$/);
 });
 
 test("mergeEnvFile replaces only the keys this run manages and keeps comments", () => {
