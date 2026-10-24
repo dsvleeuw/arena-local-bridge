@@ -11,6 +11,9 @@ function loginFixture(t) {
   fs.mkdirSync(path.join(root, "bin"));
   fs.mkdirSync(path.join(root, "src"));
   fs.copyFileSync(new URL("../bin/login.mjs", import.meta.url), path.join(root, "bin/login.mjs"));
+  // Real module: the key is now written through writeSecretFile so the .env is
+  // protected before the secret is in it (on Windows, mode bits are ignored).
+  fs.copyFileSync(new URL("../src/secret.mjs", import.meta.url), path.join(root, "src/secret.mjs"));
   const record = `import fs from "node:fs"; const event = (type, data) => fs.appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({type, data}) + "\\n");\n`;
   fs.writeFileSync(path.join(root, "src/config.mjs"), record + `
     export function loadDotEnv(file) {

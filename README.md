@@ -66,11 +66,25 @@ For a source installation:
 git clone https://github.com/Gandhara2077/arena-local-bridge.git
 cd arena-local-bridge
 
-bash install.sh --email you@example.com
+bash install.sh --email you@example.com     # macOS, Linux, WSL, Git Bash
 ~~~
 
-`install.sh` generates the local keys, logs in with your own account and starts the bridge; it prints the bearer
-key it wrote to `~/.arena-bridge/.env`. On Windows, double-click `start-gui.bat` instead.
+~~~bat
+install.bat --email you@example.com         :: Windows, from cmd.exe or PowerShell
+~~~
+
+Either entry point does the same work: it generates the local keys, signs in with your own account, starts the
+bridge and runs the self-test. It prints the bearer key it wrote to `~/.arena-bridge/.env`
+(`%USERPROFILE%\.arena-bridge\.env` on Windows).
+
+> **Windows and `bash`.** Typing `bash install.sh` in `cmd.exe` does not run this project's installer: `bash` is
+> the WSL launcher, and a machine without a WSL distribution answers "Windows Subsystem for Linux has no
+> installed distributions". Use `install.bat`, which needs no WSL, or run `install.sh` inside WSL or Git Bash.
+>
+> `install.bat` finds Node.js 20+ (offering `winget install OpenJS.NodeJS.LTS` when it is missing) and forwards
+> every option to `bin/install.mjs`, so both shells run the same code. `install.bat --status` and
+> `install.bat --stop` manage the bridge it started; `install.bat --start` brings it back after a reboot.
+> `start-gui.bat` stays the launch button for the portable release and keeps its state in `.arena-gui`.
 
 Doing it by hand:
 

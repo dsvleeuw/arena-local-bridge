@@ -31,6 +31,16 @@ npm install
 npx playwright install chromium
 ~~~
 
+On Windows there is no bash: `bash install.sh` from cmd.exe only reaches the WSL launcher. Use the native
+entry point instead — it finds or installs Node.js 20+, then runs the same `bin/install.mjs`:
+
+~~~bat
+install.bat --email <email>
+~~~
+
+`install.bat --status`, `--start` and `--stop` manage the bridge it started. `start-gui.bat` remains the
+portable release's launcher.
+
 Log in with the user's own credentials:
 
 ~~~bash

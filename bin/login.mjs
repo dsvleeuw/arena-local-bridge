@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { loadDotEnv, loadConfig } from "../src/config.mjs";
 import { CredentialStore } from "../src/credentials.mjs";
+import { writeSecretFile } from "../src/secret.mjs";
 import { ArenaBrowser } from "../src/arena-login.mjs";
 import { log } from "../src/util.mjs";
 
@@ -41,11 +42,17 @@ async function main() {
   const dotEnv = loadDotEnv(envPath);
   const config = loadConfig({ ...dotEnv, ...process.env }, { requireBridgeKey: false });
 
-  // Provision a local encryption key if missing (persist to DATA_DIR/.env)
+  // Provision a local encryption key if missing (persist to DATA_DIR/.env).
+  // Through writeSecretFile, not appendFileSync: on Windows the mode argument
+  // is ignored, so an appended key keeps whatever ACL the directory hands down
+  // until the bridge's next boot tightens it. writeSecretFile protects the file
+  // before the key is in it, and the credentials encrypted with that key are
+  // written right after this.
   let secret = dotEnv.STORAGE_ENCRYPTION_KEY;
   if (!secret) {
     secret = crypto.randomBytes(32).toString("hex");
-    fs.appendFileSync(envPath, `\nSTORAGE_ENCRYPTION_KEY=${secret}\n`, { mode: 0o600 });
+    const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
+    writeSecretFile(envPath, `${existing}\nSTORAGE_ENCRYPTION_KEY=${secret}\n`);
     log.info("login", "generated STORAGE_ENCRYPTION_KEY", { file: envPath });
   }
 
