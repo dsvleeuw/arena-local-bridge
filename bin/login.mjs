@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createInterface } from "node:readline/promises";
-import { loadDotEnv, loadConfig } from "../src/config.mjs";
+import { loadDotEnv, loadConfig, applyRuntimeEnv } from "../src/config.mjs";
 import { CredentialStore } from "../src/credentials.mjs";
 import { writeSecretFile } from "../src/secret.mjs";
 import { ArenaBrowser } from "../src/arena-login.mjs";
@@ -40,6 +40,7 @@ async function main() {
   const envPath = path.join(dataDir, ".env");
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const dotEnv = loadDotEnv(envPath);
+  applyRuntimeEnv(dotEnv);
   const config = loadConfig({ ...dotEnv, ...process.env }, { requireBridgeKey: false });
 
   // Provision a local encryption key if missing (persist to DATA_DIR/.env).

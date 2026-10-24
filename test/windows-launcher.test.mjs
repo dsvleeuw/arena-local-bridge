@@ -199,6 +199,9 @@ describe("the Windows executable launcher", { skip: process.platform !== "win32"
     assert.match(failed.output, /exited|failed/i);
     assert.ok(failed.output.includes(path.join(item.dir, ".arena-gui", "bridge.log")));
     assert.match(fs.readFileSync(path.join(item.dir, ".arena-gui", "bridge.log"), "utf8"), /synthetic boot failure/);
+    // The dialog has to carry the cause, not just the path to it: a user who
+    // reads "review bridge.log" has nowhere to look from a MessageBox.
+    assert.match(failed.output, /Last lines of bridge\.log[\s\S]*synthetic boot failure/);
   });
 
   test("graceful stop also releases only this launcher's descendant job", async () => {

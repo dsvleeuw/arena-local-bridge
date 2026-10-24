@@ -22,7 +22,7 @@
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadDotEnv, loadConfig } from "../src/config.mjs";
+import { loadDotEnv, loadConfig, applyRuntimeEnv } from "../src/config.mjs";
 import { CredentialStore } from "../src/credentials.mjs";
 import { Bridge } from "../src/bridge.mjs";
 import { log } from "../src/util.mjs";
@@ -64,6 +64,11 @@ export async function diagnoseComposeFailure(page, error, { proxy = "" } = {}) {
   const message = String(error?.message || error || "");
   return {
     kind: /recaptcha/i.test(message) ? "recaptcha" : "compose",
+    // Which step of the turn the refusal belongs to. "Arena Agent output failed"
+    // means the Session WAS created (the URL carries its id) and reading it was
+    // refused — a different problem from a composer that never rendered, and it
+    // points at the account or its token rather than at the page.
+    stage: /output failed/i.test(message) ? "read" : /append failed/i.test(message) ? "append" : "compose",
     status: Number(error?.status || 0) || null,
     headed: process.env.ARENA_HEADED === "1",
     // The value the BROWSER was actually handed, not what the shell happens to
@@ -130,6 +135,7 @@ export async function converseOnce(bridge, sessionId, prompt) {
 async function main() {
   const dataDir = process.env.DATA_DIR || path.join(os.homedir(), ".arena-bridge");
   const dotEnv = loadDotEnv(path.join(dataDir, ".env"));
+  applyRuntimeEnv(dotEnv);
   const config = loadConfig({ ...dotEnv, ...process.env }, { requireBridgeKey: false });
   const secret = requireSecret(dotEnv);
   const credentials = new CredentialStore({

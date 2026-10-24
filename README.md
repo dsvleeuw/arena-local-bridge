@@ -85,6 +85,13 @@ bridge and runs the self-test. It prints the bearer key it wrote to `~/.arena-br
 > every option to `bin/install.mjs`, so both shells run the same code. `install.bat --status` and
 > `install.bat --stop` manage the bridge it started; `install.bat --start` brings it back after a reboot.
 > `start-gui.bat` stays the launch button for the portable release and keeps its state in `.arena-gui`.
+>
+> The browser is **visible by default** — Arena renders differently to a headless engine, and a window you can
+> watch is what makes a refused sign-in diagnosable. `--headless` (or `ARENA_HEADED=0` in `DATA_DIR/.env`) hides it;
+> the installer records the choice, and `--headed` still forces a window for an install that stored `0`.
+> `Invalid email or password` means that address and password do not match; a sign-in that succeeds but whose
+> session cannot be confirmed is stored anyway and reported as an account that is not ready, rather than being
+> guessed at during sign-in.
 
 Doing it by hand:
 

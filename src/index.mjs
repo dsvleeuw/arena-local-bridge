@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { loadDotEnv, loadConfig } from "./config.mjs";
+import { loadDotEnv, loadConfig, applyRuntimeEnv } from "./config.mjs";
 import { CredentialStore } from "./credentials.mjs";
 import { Bridge } from "./bridge.mjs";
 import { RecaptchaBroker } from "./recaptcha.mjs";
@@ -26,6 +26,9 @@ async function main() {
   const dataDir = process.env.DATA_DIR || path.join(os.homedir(), ".arena-bridge");
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const dotEnv = loadDotEnv(path.join(dataDir, ".env"));
+  // ARENA_HEADED lives in .env for an install that wants a visible browser; the
+  // modules that read it look at process.env, so hand it over before config.
+  applyRuntimeEnv(dotEnv);
   const mergedEnv = { ...dotEnv, ...process.env };
   const config = loadConfig(mergedEnv);
   log.info("boot", "arena-bridge starting", {

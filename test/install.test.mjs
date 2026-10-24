@@ -12,7 +12,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { parseArgs, mergeEnvFile, parseEnvFile, InstallError } from "../bin/install.mjs";
+import { parseArgs, mergeEnvFile, parseEnvFile, promptPassword, InstallError } from "../bin/install.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -80,6 +80,7 @@ function fixture(t) {
       key: process.env.ARENA_AGENT_BRIDGE_KEY || "",
       dataDir: process.env.DATA_DIR || "",
       chrome: process.env.ARENA_AGENT_CHROME || "",
+      headed: process.env.ARENA_HEADED || "",
     }) + "\\n");
     process.exit(Number(process.env.FIXTURE_LOGIN_EXIT || 0));
   `
@@ -213,6 +214,40 @@ test("parseArgs accepts install.sh's spellings and rejects a bad port", () => {
   assert.throws(() => parseArgs(["--warp"]), /POSIX-only/);
 });
 
+test("the password prompt refuses a pipe instead of reading the wrong stream", async () => {
+  // A non-interactive stdin (a pipe, a scheduled task) must fail with a way out,
+  // not hang waiting for input nobody can type.
+  await assert.rejects(promptPassword("person@example.com", { stdin: { isTTY: false } }), /not interactive/);
+});
+
+test("the password prompt masks what is typed", async () => {
+  const listeners = new Map();
+  const stdin = {
+    isTTY: true,
+    setRawMode() {},
+    resume() {},
+    pause() {},
+    setEncoding() {},
+    on: (name, handler) => listeners.set(name, handler),
+    removeListener: (name) => listeners.delete(name),
+  };
+  let written = "";
+  const stderr = { write: (text) => { written += text; return true; } };
+  const promise = promptPassword("person@example.com", { stdin, stderr });
+  await new Promise((resolve) => setImmediate(resolve));
+  const type = (text) => listeners.get("data")(text);
+  type("corr");
+  type("\u007f"); // backspace removes the last character
+  type("rect\r");
+  assert.equal(await promise, "correct");
+  // The typed characters never reach the terminal: only the label, stars, and
+  // the erase sequence a backspace produces. Nothing after the label may be a
+  // letter or digit that could be read off a screenshot.
+  assert.equal(written.includes("corr"), false, "the password must not be echoed");
+  assert.ok(written.startsWith("Password for person@example.com: "), written);
+  assert.match(written.slice("Password for person@example.com: ".length), /^\*+\u0008 \u0008\*+\n$/);
+});
+
 test("mergeEnvFile replaces only the keys this run manages and keeps comments", () => {
   const existing = [
     "# hand-written",
@@ -335,6 +370,36 @@ test("re-running keeps both keys and unrelated .env content", (t) => {
   assert.equal(rotated.status, 0, rotated.stderr);
   assert.equal(readEnv(dataDir).ARENA_AGENT_BRIDGE_KEY, "explicit-key");
   assert.equal(readEnv(dataDir).STORAGE_ENCRYPTION_KEY, keys.STORAGE_ENCRYPTION_KEY);
+});
+
+test("the browser is visible by default, and --headless (or ARENA_HEADED=0) opts out", async (t) => {
+  const fx = fixture(t);
+  const port = await freePort();
+  const dataDir = path.join(fx.root, "state");
+  const base = ["--email", "fixture@example.com", "--password", "pw", "--data-dir", dataDir, "--no-start"];
+
+  const plain = fx.run([...base, "--chrome", fx.browser]);
+  assert.equal(plain.status, 0, plain.stderr + plain.stdout);
+  assert.equal(fx.lines(fx.events).find((event) => event.argv).headed, "1", "headed is the default");
+  assert.equal(readEnv(dataDir).ARENA_HEADED, "1", "and it is remembered for later starts");
+
+  // A windowless run has to be asked for, and is remembered too.
+  const headless = fx.run([...base, "--chrome", fx.browser, "--headless"]);
+  assert.equal(headless.status, 0, headless.stderr + headless.stdout);
+  assert.equal(fx.lines(fx.events).filter((event) => event.argv).at(-1).headed, "");
+  assert.equal(readEnv(dataDir).ARENA_HEADED, "0");
+  assert.equal(fx.lines(fx.boots).length, 0, "--no-start must not start a bridge");
+
+  // …and a plain re-run respects that stored 0 instead of flipping it back.
+  const again = fx.run([...base, "--chrome", fx.browser]);
+  assert.equal(again.status, 0, again.stderr + again.stdout);
+  assert.equal(fx.lines(fx.events).filter((event) => event.argv).at(-1).headed, "");
+
+  // --headed is still accepted for old command lines.
+  const forced = fx.run([...base, "--chrome", fx.browser, "--headed"]);
+  assert.equal(forced.status, 0, forced.stderr + forced.stdout);
+  assert.equal(fx.lines(fx.events).filter((event) => event.argv).at(-1).headed, "1");
+  assert.equal(readEnv(dataDir).ARENA_HEADED, "1");
 });
 
 test("--start brings the installed bridge back without signing in again", async (t) => {

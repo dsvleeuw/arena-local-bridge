@@ -50,6 +50,33 @@ async function withEnv(vars, fn) {
   }
 }
 
+describe("diagnoseComposeFailure: which step refused the turn", () => {
+  test("a refused /out read is reported as stage=read, not as a composer problem", async () => {
+    // create-chat succeeded -- the URL carries the Session's id -- and the read
+    // was refused. That points at the account or its token, not at the page.
+    const error = Object.assign(
+      new Error('Arena Agent output failed: 403 {"error":"recaptcha validation failed"}'),
+      { status: 403 }
+    );
+    const diag = await diagnoseComposeFailure(fakePage({ url: "https://arena.ai/agent/abc" }), error);
+    assert.equal(diag.stage, "read");
+    assert.equal(diag.kind, "recaptcha", "the body says what the 403 was");
+    assert.equal(diag.status, 403);
+  });
+
+  test("a composer that never rendered stays stage=compose", async () => {
+    const diag = await diagnoseComposeFailure(fakePage(), composeFailure());
+    assert.equal(diag.stage, "compose");
+    assert.equal(diag.kind, "compose");
+  });
+
+  test("an append failure names the append step", async () => {
+    const error = Object.assign(new Error("Arena Agent append failed: 409 conflict"), { status: 409 });
+    const diag = await diagnoseComposeFailure(fakePage(), error);
+    assert.equal(diag.stage, "append");
+  });
+});
+
 describe("diagnoseComposeFailure (ticket 25)", () => {
   test("a 403 naming reCAPTCHA is reported as kind=recaptcha, with the status", async () => {
     const diag = await diagnoseComposeFailure(fakePage(), recaptcha403());
