@@ -63,6 +63,7 @@ export function parseArgs(argv) {
     dataDir: "",
     chrome: "",
     noLogin: false,
+    headed: false,
     noStart: false,
     noSelftest: false,
     start: false,
@@ -130,6 +131,9 @@ export function parseArgs(argv) {
       }
       case "--no-login":
         options.noLogin = true;
+        break;
+      case "--headed":
+        options.headed = true;
         break;
       case "--no-start":
         options.noStart = true;
@@ -465,7 +469,7 @@ async function stopRecorded(record, { dataDir = record.dataDir, quiet = false } 
   return true;
 }
 
-async function startBridge({ root, dataDir, port, key, chrome, proxy, env = process.env }) {
+async function startBridge({ root, dataDir, port, key, chrome, proxy, headed = false, env = process.env }) {
   const current = await health(port);
   if (current) {
     const record = readPidRecord(dataDir);
@@ -492,6 +496,7 @@ async function startBridge({ root, dataDir, port, key, chrome, proxy, env = proc
   };
   if (chrome) childEnv.ARENA_AGENT_CHROME = chrome;
   if (proxy) childEnv.ARENA_AGENT_PROXY = proxy;
+  if (headed) childEnv.ARENA_HEADED = "1";
 
   const logFd = fs.openSync(logFile, "a");
   let child;
@@ -576,7 +581,7 @@ async function promptPassword(email) {
   }
 }
 
-async function login({ root, dataDir, key, email, password, chrome, proxy, env = process.env }) {
+async function login({ root, dataDir, key, email, password, chrome, proxy, headed = false, env = process.env }) {
   if (!email) {
     throw new InstallError(
       "no email. Pass --email you@example.com (or set ARENA_EMAIL), or use --no-login to skip signing in."
@@ -594,7 +599,8 @@ async function login({ root, dataDir, key, email, password, chrome, proxy, env =
   };
   if (chrome) childEnv.ARENA_AGENT_CHROME = chrome;
   if (proxy) childEnv.ARENA_AGENT_PROXY = proxy;
-  detail(`signing in as ${email}`);
+  if (headed) childEnv.ARENA_HEADED = "1";
+  detail(`signing in as ${email}${headed ? " (headed: watch the browser)" : ""}`);
   const result = spawnSync(process.execPath, [path.join(root, "bin", "login.mjs"), "--email", email], {
     cwd: root,
     env: childEnv,
@@ -602,18 +608,33 @@ async function login({ root, dataDir, key, email, password, chrome, proxy, env =
   });
   if (result.error) throw new InstallError(`could not run bin/login.mjs: ${result.error.message}`);
   if (result.status !== 0) {
+    // The two failures need different reactions, so do not collapse them into
+    // one sentence. The child already printed Arena's own answer above.
     throw new InstallError(
-      `Arena login failed (exit ${result.status}). Check the email and password, and that Chrome or Edge is installed.`
+      [
+        `Arena login failed (exit ${result.status}).`,
+        "",
+        "  Invalid email or password (401)  -> the password for that address is wrong.",
+        "                                     Check the exact email, then retry.",
+        "  session is not usable            -> Arena accepted the password but served the",
+        "                                     account as logged out. A new session is",
+        "                                     stored anyway; the bridge reports the account",
+        "                                     as not ready instead of pretending it works.",
+        "  no Chromium-based browser        -> install Chrome or Edge, or pass --chrome <path>.",
+        "",
+        "Add --headed to watch the sign-in in a real browser window.",
+      ].join("\n")
     );
   }
 }
 
 // ── self-test ───────────────────────────────────────────────────────────────
 
-function runSelftest({ root, dataDir, key, chrome, proxy, env = process.env }) {
+function runSelftest({ root, dataDir, key, chrome, proxy, headed = false, env = process.env }) {
   const childEnv = { ...env, DATA_DIR: dataDir, ARENA_AGENT_BRIDGE_KEY: key };
   if (chrome) childEnv.ARENA_AGENT_CHROME = chrome;
   if (proxy) childEnv.ARENA_AGENT_PROXY = proxy;
+  if (headed) childEnv.ARENA_HEADED = "1";
   const result = spawnSync(process.execPath, [path.join(root, "bin", "selftest.mjs")], {
     cwd: root,
     env: childEnv,
@@ -631,8 +652,8 @@ function runSelftest({ root, dataDir, key, chrome, proxy, env = process.env }) {
 
 /** Start, then wait. A bridge that never becomes healthy is torn down again so
  *  the next run is not blocked by a half-started process on the same port. */
-async function startAndWait({ dataDir, port, key, chrome, proxy }) {
-  const started = await startBridge({ root: ROOT, dataDir, port, key, chrome, proxy });
+async function startAndWait({ dataDir, port, key, chrome, proxy, headed = false }) {
+  const started = await startBridge({ root: ROOT, dataDir, port, key, chrome, proxy, headed });
   try {
     const payload = await waitForHealth(started);
     return { started, payload };
@@ -668,6 +689,9 @@ Options:
   --proxy <url>         Browser proxy, e.g. socks5://127.0.0.1:40000
   --data-dir <dir>      State directory (default ~/.arena-bridge)
   --chrome <path>       Chromium-based browser to use
+  --headed              Show the browser instead of running it headless. Useful
+                        for the first sign-in, and for a sign-in that Arena
+                        refuses: you can see what the page actually does.
   --no-login            Install and write .env only; do not sign in or start
   --no-start            Sign in, but do not start the bridge
   --no-selftest         Skip the end-to-end Arena self-test
@@ -797,6 +821,7 @@ async function installCommand(options) {
     password: String(options.password || process.env.ARENA_PASSWORD || ""),
     chrome,
     proxy,
+    headed: options.headed,
   });
 
   if (options.noStart) {
@@ -807,7 +832,7 @@ async function installCommand(options) {
   }
 
   step(5, "Start bridge");
-  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy });
+  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy, headed: options.headed });
 
   step(6, "Wait for health");
   detail(`healthy on http://127.0.0.1:${port} (pid ${payload.pid ?? started.child.pid})`);
@@ -819,7 +844,7 @@ async function installCommand(options) {
     detail("--no-selftest: skipped");
   } else {
     step(7, "Self-test (a real turn against Arena)");
-    selftest = runSelftest({ root: ROOT, dataDir, key, chrome, proxy });
+    selftest = runSelftest({ root: ROOT, dataDir, key, chrome, proxy, headed: options.headed });
   }
 
   printStartSummary({ dataDir, envFile: env.file, key, port, selftest });
@@ -856,7 +881,7 @@ async function startCommand(options) {
   step(4, "Sign in to arena.ai with your own account");
   detail("--start: skipped; the saved account is reused");
   step(5, "Start bridge");
-  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy });
+  const { started, payload } = await startAndWait({ dataDir, port, key, chrome, proxy, headed: options.headed });
   step(6, "Wait for health");
   detail(`healthy on http://127.0.0.1:${port} (pid ${payload.pid ?? started.child.pid})`);
   detail(`log: ${started.logFile}`);

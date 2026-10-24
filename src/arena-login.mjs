@@ -99,6 +99,37 @@ async function installDeploymentPin(context, pin) {
   });
 }
 
+/**
+ * What did the post-login probe of /agent actually show?
+ *
+ * Arena answers `200 {ok}` and sets an auth cookie even for an account it will
+ * not serve, so a "successful" sign-in is not proof of a usable session — the
+ * page has to be asked. The old version of this check answered with a bare
+ * boolean (`does the HTML mention the email?`), which turned every response the
+ * probe could not read into "restricted": a page that changed shape, a
+ * different render, any hiccup. That is a verdict this code has no evidence
+ * for.
+ *
+ * Three answers, and only one of them is a refusal:
+ *
+ *   usable   — the account's own email is in the /agent payload
+ *   unusable — Arena refused /agent outright (4xx/5xx), so the session is dead
+ *   unknown  — everything else: we could not confirm identity, and we could not
+ *              disprove it either
+ *
+ * `unknown` is deliberately NOT `unusable`. Whoever signed in can still be
+ * right about their own account, and the bridge re-checks readiness before it
+ * serves a turn, so a genuinely restricted account surfaces there with a
+ * reason instead of being guessed at here.
+ */
+export function classifySessionProbe({ status = 0, html = "", email = "" } = {}) {
+  const code = Number(status) || 0;
+  if (code >= 400) return "unusable";
+  const identity = String(email || "").trim().toLowerCase();
+  if (identity && String(html || "").toLowerCase().includes(identity)) return "usable";
+  return "unknown";
+}
+
 export function resolvePlaywright(omniRoot) {
   const candidates = [];
   if (omniRoot) candidates.push(`${omniRoot}/node_modules/playwright`, `${omniRoot}/node_modules/playwright-core`);
@@ -493,13 +524,32 @@ export class ArenaBrowser {
       // both for a restricted account and then serves it as logged out, which
       // used to make this method report success for an account that could not
       // drive a single session — and the auto-refresh loop kept "fixing" it.
-      if (!(await this.sessionIsUsable(page, email))) {
+      // See classifySessionProbe for why only positive evidence refuses.
+      const probe = await this.probeSession(page, email);
+      if (probe.verdict === "unusable") {
         throw Object.assign(
           new Error(
-            `Arena signed in as ${email} but the session is not usable ` +
-              "(/agent does not render as this account — most likely the account is restricted)"
+            `Arena signed in as ${email} but /agent answered ${probe.status}, so the session is not usable ` +
+              "(most likely the account is restricted)"
           ),
           { code: "session_not_usable" }
+        );
+      }
+      if (probe.verdict === "unknown" && String(process.env.ARENA_LOGIN_STRICT || "") === "1") {
+        throw Object.assign(
+          new Error(
+            `Arena signed in as ${email}, but /agent did not mention this account and ` +
+              "ARENA_LOGIN_STRICT=1 refuses to store an unverified session"
+          ),
+          { code: "session_not_usable" }
+        );
+      }
+      if (probe.verdict === "unknown") {
+        log.warn(
+          "arena-login",
+          "signed in, but /agent did not mention this account; storing the session anyway " +
+            "and leaving the readiness check to the bridge",
+          { email, status: probe.status, hint: "set ARENA_LOGIN_STRICT=1 to refuse this instead" }
         );
       }
       const cookieHeader = cookies
@@ -513,21 +563,35 @@ export class ArenaBrowser {
   }
 
   /**
-   * Is the signed-in session actually usable? When Arena accepts the account it
-   * renders /agent with that account's own email in the server payload; when it
-   * has quietly restricted the account, the same request renders as a visitor
-   * and the email never appears. Verified against a known-restricted account
-   * and a known-good one — the signal flips between them.
+   * Ask the signed-in page what Arena thinks of this account. When Arena serves
+   * the account, /agent carries its email in the server payload; when the
+   * account is restricted the same request renders as a visitor and the email
+   * never appears — but neither does an error, which is why the status code and
+   * the body are returned together instead of a bare boolean.
+   */
+  async probeSession(page, email) {
+    try {
+      const response = await page.evaluate(async () => {
+        const result = await fetch("/agent", { headers: { Accept: "text/html" } });
+        return { status: result.status, html: await result.text() };
+      });
+      const status = Number(response?.status) || 0;
+      return { verdict: classifySessionProbe({ status, html: response?.html, email }), status };
+    } catch (error) {
+      // A probe that could not run proves nothing about the account.
+      return { verdict: "unknown", status: 0, reason: String(error?.message || error) };
+    }
+  }
+
+  /**
+   * The strict boolean view of probeSession, kept for callers that only want to
+   * ask "is this certainly usable?" — false for both `unknown` and `unusable`.
+   * login() uses the verdict, because refusing on `unknown` is how a page
+   * change locked every account out.
    */
   async sessionIsUsable(page, email) {
-    try {
-      const html = await page.evaluate(async () =>
-        (await fetch("/agent", { headers: { Accept: "text/html" } })).text()
-      );
-      return String(html).toLowerCase().includes(String(email).toLowerCase());
-    } catch {
-      return false;
-    }
+    const probe = await this.probeSession(page, email);
+    return probe.verdict === "usable";
   }
 
   /**

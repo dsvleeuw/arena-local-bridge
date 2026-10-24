@@ -85,6 +85,11 @@ bridge and runs the self-test. It prints the bearer key it wrote to `~/.arena-br
 > every option to `bin/install.mjs`, so both shells run the same code. `install.bat --status` and
 > `install.bat --stop` manage the bridge it started; `install.bat --start` brings it back after a reboot.
 > `start-gui.bat` stays the launch button for the portable release and keeps its state in `.arena-gui`.
+>
+> If a sign-in is refused, `install.bat --email you@example.com --headed` shows the browser while it happens.
+> `Invalid email or password` means that address and password do not match; a sign-in that succeeds but whose
+> session cannot be confirmed is stored anyway and reported as an account that is not ready, rather than being
+> guessed at during sign-in.
 
 Doing it by hand:
 

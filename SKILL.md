@@ -47,6 +47,16 @@ Log in with the user's own credentials:
 node bin/login.mjs --email <email> --password '<password>'
 ~~~
 
+Three different answers come back from a sign-in attempt, and they call for different reactions:
+
+| Message | Meaning |
+| --- | --- |
+| `Arena login failed (401): Invalid email or password` | That address and password do not match. Check the exact address. |
+| `signed in as ... but /agent answered 4xx` | Arena refuses the session outright (`session_not_usable`). |
+| `signed in, but /agent did not mention this account` | A warning, not a failure: the session is stored and the bridge decides whether the account is ready. Set `ARENA_LOGIN_STRICT=1` to refuse it instead. |
+
+Add `ARENA_HEADED=1` (or `--headed` to the installer) to watch the browser during the sign-in.
+
 The bridge refuses to start without a bearer key for its own API, and `login.mjs` does not create one — it only
 provisions `STORAGE_ENCRYPTION_KEY`. Set `ARENA_AGENT_BRIDGE_KEY` (or let `install.sh` generate it and persist it
 in `DATA_DIR/.env`) before starting:

@@ -80,6 +80,7 @@ function fixture(t) {
       key: process.env.ARENA_AGENT_BRIDGE_KEY || "",
       dataDir: process.env.DATA_DIR || "",
       chrome: process.env.ARENA_AGENT_CHROME || "",
+      headed: process.env.ARENA_HEADED || "",
     }) + "\\n");
     process.exit(Number(process.env.FIXTURE_LOGIN_EXIT || 0));
   `
@@ -335,6 +336,35 @@ test("re-running keeps both keys and unrelated .env content", (t) => {
   assert.equal(rotated.status, 0, rotated.stderr);
   assert.equal(readEnv(dataDir).ARENA_AGENT_BRIDGE_KEY, "explicit-key");
   assert.equal(readEnv(dataDir).STORAGE_ENCRYPTION_KEY, keys.STORAGE_ENCRYPTION_KEY);
+});
+
+test("--headed shows the sign-in browser, and without it nothing turns headed mode on", async (t) => {
+  const fx = fixture(t);
+  const port = await freePort();
+  const dataDir = path.join(fx.root, "state");
+  const plain = fx.run([
+    "--email",
+    "fixture@example.com",
+    "--password",
+    "pw",
+    "--data-dir",
+    dataDir,
+    "--chrome",
+    fx.browser,
+    "--port",
+    String(port),
+    "--no-start",
+  ]);
+  assert.equal(plain.status, 0, plain.stderr + plain.stdout);
+  assert.equal(fx.lines(fx.events).find((event) => event.argv).headed, "");
+
+  const headed = fx.run(
+    ["--email", "fixture@example.com", "--password", "pw", "--data-dir", dataDir, "--chrome", fx.browser, "--no-start", "--headed"],
+    { FIXTURE_SELFTEST_EXIT: "" }
+  );
+  assert.equal(headed.status, 0, headed.stderr + headed.stdout);
+  assert.equal(fx.lines(fx.events).filter((event) => event.argv).at(-1).headed, "1");
+  assert.match(headed.stdout, /headed: watch the browser/);
 });
 
 test("--start brings the installed bridge back without signing in again", async (t) => {
