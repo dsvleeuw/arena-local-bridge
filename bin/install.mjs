@@ -664,7 +664,9 @@ async function login({ root, dataDir, key, email, password, chrome, proxy, heade
         "                                     as not ready instead of pretending it works.",
         "  no Chromium-based browser        -> install Chrome or Edge, or pass --chrome <path>.",
         "",
-        "Add --headed to watch the sign-in in a real browser window.",
+        headed
+          ? "The browser window is still open; close it once you have read the page."
+          : "Add --headed to watch the sign-in in a real browser window.",
       ].join("\n")
     );
   }
