@@ -52,7 +52,10 @@ internal static class Program
         }
         catch (Exception error)
         {
-            string message = error.Message + "\n\nLogs: " + Path.Combine(root, ".arena-gui", "bridge.log");
+            string logFile = Path.Combine(root, ".arena-gui", "bridge.log");
+            string message = error.Message + "\n\nLogs: " + logFile;
+            string tail = TailLog(logFile);
+            if (tail.Length > 0) message += "\n\nLast lines of bridge.log:\n" + tail;
             if (consoleErrors)
             {
                 // A GUI-subsystem executable has no console code page to set.
@@ -63,6 +66,37 @@ internal static class Program
             else MessageBox.Show(message, "Arena Local Bridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
+    }
+
+    // "Review bridge.log for the cause" sends the user hunting for a file. The
+    // last lines of that file are what name the cause (no Chromium-based
+    // browser, a bad .env entry, Node too old), so they belong in the message —
+    // bounded, because a MessageBox has no scrollbar worth using. The file is
+    // opened read-only with sharing: the launcher itself may still be appending.
+    internal static string TailLog(string file, int maxLines = 12, int maxChars = 3000)
+    {
+        try
+        {
+            if (!File.Exists(file)) return "";
+            var lines = new Queue<string>();
+            using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(stream, Encoding.UTF8))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    lines.Enqueue(line);
+                    if (lines.Count > maxLines) lines.Dequeue();
+                }
+            }
+            if (lines.Count == 0) return "";
+            string text = string.Join("\n", lines.ToArray());
+            if (text.Length > maxChars) text = text.Substring(text.Length - maxChars);
+            return text;
+        }
+        catch (IOException) { return ""; }
+        catch (UnauthorizedAccessException) { return ""; }
+        catch (ArgumentException) { return ""; }
     }
 
     private static string InstallId(string root)
@@ -164,7 +198,14 @@ internal sealed class Launcher : IDisposable
             var clock = Stopwatch.StartNew();
             while (clock.ElapsedMilliseconds < timeout && !stopping)
             {
-                if (child.HasExited) throw new IOException("The bridge exited before startup (exit " + child.ExitCode + "). Review bridge.log for the cause.");
+                if (child.HasExited)
+                {
+                    // Parameterless WaitForExit drains the redirected output, so
+                    // the message about this exit can quote the log it produced
+                    // instead of racing the line that explains it.
+                    child.WaitForExit();
+                    throw new IOException("The bridge exited before startup (exit " + child.ExitCode + "). Review bridge.log for the cause." + DescribeLog());
+                }
                 if (Healthy())
                 {
                     ready.Set();
@@ -181,10 +222,19 @@ internal sealed class Launcher : IDisposable
         }
         catch (Exception error)
         {
-            failure = error.Message;
+            // Also what a second launch of this installation is told.
+            failure = error.Message + DescribeLog();
             ready.Set();
             throw;
         }
+    }
+
+    /** The same tail a failing dialog shows, for the control pipe's answers. */
+    private string DescribeLog()
+    {
+        string file = Path.Combine(root, ".arena-gui", "bridge.log");
+        string tail = Program.TailLog(file);
+        return tail.Length == 0 ? "" : "\n\nLast lines of bridge.log:\n" + tail;
     }
 
     private void ReadPathSetting(ProcessStartInfo start, string file, string variable)
