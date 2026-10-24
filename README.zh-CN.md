@@ -65,11 +65,24 @@ Windows 用户可从[发行页面](https://github.com/Gandhara2077/arena-local-b
 git clone https://github.com/Gandhara2077/arena-local-bridge.git
 cd arena-local-bridge
 
-bash install.sh --email you@example.com
+bash install.sh --email you@example.com     # macOS、Linux、WSL、Git Bash
 ~~~
 
-`install.sh` 会生成所需密钥、用你自己的账号登录并启动 bridge，最后打印它写进 `~/.arena-bridge/.env`
-的 Bearer Key。Windows 上改为双击 `start-gui.bat`。
+~~~bat
+install.bat --email you@example.com         :: Windows（cmd.exe 或 PowerShell）
+~~~
+
+两个入口做同样的事：生成所需密钥、用你自己的账号登录、启动 bridge 并运行自检，最后打印写入
+`~/.arena-bridge/.env`（Windows 为 `%USERPROFILE%\.arena-bridge\.env`）的 Bearer Key。
+
+> **Windows 与 `bash`。** 在 `cmd.exe` 中执行 `bash install.sh` 并不会运行本项目的安装脚本：`bash` 只是 WSL
+> 启动器，未安装发行版时会提示 “Windows Subsystem for Linux has no installed distributions”。请改用
+> `install.bat`（不需要 WSL），或在 WSL / Git Bash 中运行 `install.sh`。
+>
+> `install.bat` 会查找 Node.js 20+（缺失时提供 `winget install OpenJS.NodeJS.LTS`），并把所有参数交给
+> `bin/install.mjs`，因此两个入口运行的是同一套代码。`install.bat --status` 与 `install.bat --stop` 管理它
+> 启动的 bridge；重启后可用 `install.bat --start` 再次启动。`start-gui.bat` 仍是便携发行版的启动按钮，
+> 其状态保存在 `.arena-gui`。
 
 手动安装：
 
